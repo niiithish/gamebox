@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# gamebox - try untrusted Windows games on Linux inside a jailed, offline sandbox.
+#
+#   gamebox new <name> <repack-folder | installer.exe>   create a sandbox + Wine prefix
+#   gamebox install <name>                 run the installer   (offline, jailed)
+#   gamebox play <name> [Game.exe]         play the game       (offline, jailed)
+#   gamebox shortcut <name> ["Title"]      add it to your app launcher
+#   gamebox shell <name>                   open a shell inside the sandbox
+#   gamebox run [--net] <name> <cmd...>    run any command inside the sandbox
+#   gamebox test [name]                    prove the sandbox holds (harmless escape test)
+#   gamebox list                           list sandboxes and disk use
+#   gamebox remove <name>                  delete a sandbox completely
+#
+# Environment:
+#   GAMEBOX_ROOT   where sandboxes live        (default: ~/Games/gamebox)
+#   GAMEBOX_CPUS   cap a game to N CPU cores   (e.g. GAMEBOX_CPUS=8)
+set -euo pipefail
+
+ROOT="${GAMEBOX_ROOT:-$HOME/Games/gamebox}"
+APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+SELF="$(realpath "$0")"
+U=$(id -u)
+
+die() { echo "gamebox: $1" >&2; [[ -t 1 ]] || notify-send -u critical "gamebox" "$1" 2>/dev/null || true; exit 1; }
+usage() { sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//'; }
+need_box() { [[ -n "${1:-}" && -d "$ROOT/$1" ]] || die "no sandbox '${1:-}' (see: gamebox list)"; }
+
+# --------------------------------------------------------------------------
+# The jail. Everything the game gets is listed here; everything else is hidden.
+# --------------------------------------------------------------------------
+jail() {
+  local net=--unshare-net extra=()
+  if [[ "${1:-}" == "--net" ]]; then
+    net=--share-net; shift
+    # DNS often lives under /run (systemd-resolved, NetworkManager)
+    extra+=(--ro-bind-try /run/systemd/resolve /run/systemd/resolve
+            --ro-bind-try /run/NetworkManager /run/NetworkManager)
+  fi
+  local box="$ROOT/$1"; shift
+  mkdir -p "$box/home"
+
+  local repack; repack="$(cat "$box/repack" 2>/dev/null || true)"
+  [[ -n "$repack" && -d "$repack" ]] && extra+=(--ro-bind "$repack" /mnt/repack)
+
+  # Display: X11 socket only (Wine draws through XWayland on Wayland desktops)
+  local d="${DISPLAY:-:0}"; d="${d#*:}"; d="${d%%.*}"
+  [[ -S /tmp/.X11-unix/X$d ]] || die "no X11 socket for DISPLAY=${DISPLAY:-unset} (is XWayland running?)"
+  extra+=(--ro-bind /tmp/.X11-unix/X"$d" /tmp/.X11-unix/X"$d" --setenv DISPLAY ":$d")
+  if [[ -n "${XAUTHORITY:-}" && -f "$XAUTHORITY" ]]; then
+    extra+=(--ro-bind "$XAUTHORITY" /tmp/.Xauthority --setenv XAUTHORITY /tmp/.Xauthority)
+  fi
+
+  # GPU: Mesa (AMD/Intel) and NVIDIA device nodes
+  local n; for n in /dev/nvidia*; do [[ -e $n ]] && extra+=(--dev-bind "$n" "$n"); done
+
+  local pre=()
+  [[ -n "${GAMEBOX_CPUS:-}" ]] && pre=(taskset -c "0-$((GAMEBOX_CPUS - 1))")
+
+  "${pre[@]}" bwrap \
+    --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/bin /sbin \
+    --symlink usr/lib /lib --symlink usr/lib /lib64 \
+    --ro-bind /etc /etc --ro-bind-try /opt /opt \
+    --ro-bind /sys /sys --proc /proc --dev /dev --dev-bind-try /dev/dri /dev/dri \
+    --tmpfs /tmp --tmpfs /run --tmpfs /home --tmpfs /root --tmpfs /mnt --tmpfs /media \
+    --bind "$box/home" "$HOME" \
+    --dir /run/user/"$U" --chmod 0700 /run/user/"$U" \
+    --ro-bind-try /run/user/"$U"/pulse/native /run/user/"$U"/pulse/native \
+    --ro-bind-try /run/user/"$U"/pipewire-0 /run/user/"$U"/pipewire-0 \
+    --unshare-user --unshare-pid --unshare-uts --unshare-cgroup-try $net \
+    --hostname gamebox --die-with-parent --new-session \
+    "${extra[@]}" \
+    --clearenv \
+    --setenv HOME "$HOME" --setenv USER "${USER:-user}" --setenv PATH /usr/bin \
+    --setenv LANG "${LANG:-C.UTF-8}" \
+    --setenv XDG_RUNTIME_DIR /run/user/"$U" \
+    --setenv PULSE_SERVER unix:/run/user/"$U"/pulse/native \
+    --setenv WINEPREFIX "$HOME/prefix" --setenv WINEDEBUG -all \
+    --chdir "$HOME" \
+    "$@"
+}
+
+# --------------------------------------------------------------------------
+cmd_new() {
+  local name="${1:-}" src="${2:-}"
+  [[ -n "$name" && -n "$src" ]] || die "usage: gamebox new <name> <repack-folder | installer.exe>"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "name may only contain letters, digits, . _ -"
+  [[ -e "$ROOT/$name" ]] && die "sandbox '$name' already exists"
+  src="$(realpath "$src")"
+  local dir setup=""
+  if [[ -f "$src" ]]; then dir="$(dirname "$src")"; setup="$(basename "$src")"
+  elif [[ -d "$src" ]]; then dir="$src"
+  else die "not found: $src"; fi
+
+  # FitGirl-style MD5 check (optional, only if present)
+  local md5; md5="$(find "$dir" -maxdepth 2 -iname '*.md5' -print -quit)"
+  if [[ -n "$md5" ]]; then
+    echo "Verifying checksums..."
+    ( cd "$(dirname "$md5")" && tr -d '\r' < "$md5" | grep -v '^;' | sed 's#\\#/#g' | md5sum -c --quiet ) \
+      && echo "Checksums OK" || die "checksum mismatch - re-download the failed files"
+  fi
+
+  mkdir -p "$ROOT/$name/home"
+  echo "$dir" > "$ROOT/$name/repack"
+  [[ -n "$setup" ]] && echo "$setup" > "$ROOT/$name/setup"
+  echo "Creating Wine prefix + DXVK/VKD3D (network ON for this step only; trusted downloads)..."
+  jail --net "$name" bash -c 'wineboot -i >/dev/null 2>&1 && winetricks -q dxvk vkd3d >/dev/null 2>&1' \
+    || echo "warning: DXVK/VKD3D install failed; games may still run (Vulkan titles do)"
+  echo "Done. Next: gamebox install $name"
+}
+
+cmd_install() {
+  need_box "${1:-}"
+  local setup; setup="$(cat "$ROOT/$1/setup" 2>/dev/null || true)"
+  # The installer source is drive R: (read-only). Install to C: when asked.
+  jail "$1" bash -c '
+    ln -sfn /mnt/repack "$WINEPREFIX/dosdevices/r:"
+    s="$1"; [[ -z "$s" ]] && s=$(cd /mnt/repack && ls | grep -iE "^setup.*\.exe$" | head -1)
+    [[ -z "$s" ]] && { echo "no setup*.exe found in the repack folder" >&2; exit 1; }
+    echo "Install to C:\\Games\\...  (R: is the read-only source drive)"
+    wine "R:\\$s"' _ "$setup"
+}
+
+# Find (and remember) the game's exe. Prints the in-sandbox path.
+find_exe() {
+  local name="$1" pick="${2:-}" f="$ROOT/$1/exe"
+  [[ -n "$pick" ]] && rm -f "$f"
+  if [[ ! -s "$f" ]]; then
+    jail "$name" bash -c '
+      find "$WINEPREFIX/drive_c" -path "*/drive_c/windows" -prune -o -type f -iname "*.exe" -printf "%s %p\n" 2>/dev/null \
+      | grep -viE "unins|redist|dxsetup|directx|crash|report|setup|dotnet|prereq|vc_?redist" \
+      | { if [[ -n "$1" ]]; then grep -i "/$1\$"; else cat; fi; } \
+      | sort -rn | head -1 | cut -d" " -f2-' _ "$pick" > "$f" || true
+    [[ -s "$f" ]] || { rm -f "$f"; die "game exe not found - installed yet? Or name it: gamebox play $name Game.exe"; }
+    echo "Using: $(sed 's#.*/drive_c/#C:/#' "$f")   (pick another: gamebox play $name Other.exe)" >&2
+  fi
+  cat "$f"
+}
+
+cmd_play() {
+  local name="${1:-}"; need_box "$name"
+  local exe; exe="$(find_exe "$name" "${2:-}")"
+  jail "$name" bash -c 'cd "$(dirname "$1")" && exec wine "$(basename "$1")"' _ "$exe"
+}
+
+# Pull the largest icon out of a PE (.exe) file. Python stdlib only.
+# Runs INSIDE the jail, so parsing the untrusted exe can't hurt the host.
+ICON_PY=$(cat <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+pe = struct.unpack_from("<I", d, 0x3C)[0]
+nsec = struct.unpack_from("<H", d, pe + 6)[0]
+opt = pe + 24
+magic = struct.unpack_from("<H", d, opt)[0]
+dd = opt + (96 if magic == 0x10B else 112)
+rva_res = struct.unpack_from("<I", d, dd + 2 * 8)[0]
+secs = pe + 24 + struct.unpack_from("<H", d, pe + 20)[0]
+def off(rva):
+    for i in range(nsec):
+        vsz, va, rsz, raw = struct.unpack_from("<IIII", d, secs + i * 40 + 8)
+        if va <= rva < va + max(vsz, rsz):
+            return rva - va + raw
+    raise ValueError("rva")
+base = off(rva_res)
+def entries(o):
+    n = sum(struct.unpack_from("<HH", d, o + 12))
+    for i in range(n):
+        nid, ptr = struct.unpack_from("<II", d, o + 16 + i * 8)
+        yield nid, ptr
+def leaf(ptr):
+    while ptr & 0x80000000:
+        ptr = next(entries(base + (ptr & 0x7FFFFFFF)))[1]
+    rva, size = struct.unpack_from("<II", d, base + ptr)
+    return d[off(rva):off(rva) + size]
+types = dict(entries(base))
+icons = {}
+for nid, ptr in entries(base + (types[3] & 0x7FFFFFFF)):
+    icons[nid] = leaf(ptr)
+best = None
+for _, ptr in entries(base + (types[14] & 0x7FFFFFFF)):
+    g = leaf(ptr)
+    for i in range(struct.unpack_from("<H", g, 4)[0]):
+        w, h, cc, _, planes, bpp, size, iid = struct.unpack_from("<BBBBHHIH", g, 6 + i * 14)
+        w = w or 256
+        if iid in icons and (best is None or (w, bpp) > best[0]):
+            best = ((w, bpp), struct.pack("<BBBBHHI", w % 256, h, cc, 0, planes, bpp, len(icons[iid])), icons[iid])
+    break
+_, hdr, img = best
+out = img if img[:8] == b"\x89PNG\r\n\x1a\n" else struct.pack("<HHH", 0, 1, 1) + hdr + struct.pack("<I", 22) + img
+sys.stdout.buffer.write(out)
+PY
+)
+
+cmd_shortcut() {
+  local name="${1:-}" title="${2:-${1:-}}"; need_box "$name"
+  mkdir -p "$APPS"
+  local icon=applications-games idir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/gamebox" exe tmp
+  if exe="$(find_exe "$name" 2>/dev/null)"; then
+    tmp="$(mktemp)"
+    jail "$name" python3 -I -c "$ICON_PY" "$exe" > "$tmp" 2>/dev/null || true
+    # Only accept a real PNG or ICO, max 2 MB
+    if [[ $(stat -c%s "$tmp") -lt 2097152 ]] && head -c 8 "$tmp" | grep -q $'^\x89PNG'; then
+      mkdir -p "$idir"; mv "$tmp" "$idir/$name.png"; icon="$idir/$name.png"
+    elif [[ $(stat -c%s "$tmp") -lt 2097152 ]] && [[ "$(head -c 4 "$tmp" | od -An -tx1 | tr -d ' ')" == 00000100 ]]; then
+      mkdir -p "$idir"; mv "$tmp" "$idir/$name.ico"; icon="$idir/$name.ico"
+    else
+      rm -f "$tmp"; echo "(couldn't extract the game's icon; using a generic one)"
+    fi
+  fi
+  cat > "$APPS/gamebox-$name.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$title (sandboxed)
+Comment=Runs jailed and offline via gamebox
+Exec="$SELF" play $name
+Icon=$icon
+Terminal=false
+Categories=Game;
+EOF
+  command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" 2>/dev/null || true
+  echo "Added '$title (sandboxed)' to your app launcher."
+}
+
+cmd_list() {
+  [[ -d "$ROOT" ]] || { echo "no sandboxes yet ($ROOT)"; return; }
+  local d n
+  for d in "$ROOT"/*/; do
+    [[ -d $d/home ]] || continue; n="$(basename "$d")"
+    printf "%-16s %8s  %s\n" "$n" "$(du -sh "$d" 2>/dev/null | cut -f1)" "$(cat "$d/repack" 2>/dev/null)"
+  done
+}
+
+cmd_remove() {
+  need_box "${1:-}"
+  read -rp "Delete $ROOT/$1 ($(du -sh "$ROOT/$1" | cut -f1))? [y/N] " a
+  [[ "$a" == [yY] ]] || { echo "Cancelled."; return; }
+  rm -rf -- "${ROOT:?}/$1" "$APPS/gamebox-$1.desktop" "${XDG_DATA_HOME:-$HOME/.local/share}/icons/gamebox/$1".{png,ico}
+  echo "Removed."
+}
+
+# --------------------------------------------------------------------------
+# Harmless escape test: behaves like an info-stealer / persistence dropper.
+# --------------------------------------------------------------------------
+cmd_test() {
+  local name="${1:-}" tmp=0
+  if [[ -z "$name" ]]; then name=".selftest-$$"; tmp=1; mkdir -p "$ROOT/$name/home"; fi
+  need_box "$name"
+  local canary="$HOME/.gamebox-canary-$$" secret="SECRET-$RANDOM$RANDOM" marker="gbx-ghost-$$"
+  echo "$secret" > "$canary"
+  local pass=0 fail=0
+  ok()  { echo "  PASS  $1"; pass=$((pass+1)); }
+  bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
+  trap 'rm -f "$canary"; [[ $tmp == 1 ]] && rm -rf "${ROOT:?}/$name"' RETURN
+
+  echo "Escape test against sandbox '$name' (all attacks should be blocked):"
+  local out
+  out="$(jail "$name" bash -c '
+    cat "$1" 2>/dev/null && echo "R1"
+    ls -A "$HOME" | grep -q "^\.gamebox-canary" && echo "R2"
+    ls "$HOME/.ssh" "$HOME/.mozilla" "$HOME/.config/google-chrome" >/dev/null 2>&1 && echo "R3"
+    touch /usr/x /etc/x 2>/dev/null && echo "W1"
+    [ -d /mnt/repack ] && touch /mnt/repack/x 2>/dev/null && echo "W2"
+    timeout 4 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" 2>/dev/null && echo "N1"
+    getent hosts github.com >/dev/null 2>&1 && echo "N2"
+    kill -0 "$2" 2>/dev/null && echo "P1"
+    [ -e /run/user/$(id -u)/bus ] && echo "D1"
+    mkdir -p ~/.config/autostart && echo x > ~/.config/autostart/evil.desktop
+    setsid bash -c "exec -a $3 sleep 300" </dev/null >/dev/null 2>&1 &
+    true' _ "$canary" "$$" "$marker" 2>/dev/null)" || true
+
+  [[ "$out" == *"$secret"* || "$out" == *R1* ]] && bad "read a secret file in your real home" || ok "cannot read files in your real home"
+  [[ "$out" == *R2* ]] && bad "can list your real home" || ok "cannot even see your real home's contents"
+  [[ "$out" == *R3* ]] && bad "found ~/.ssh or browser profiles" || ok "no ~/.ssh, no browser profiles"
+  [[ "$out" == *W1* ]] && bad "wrote to /usr or /etc" || ok "system folders are read-only"
+  [[ "$out" == *W2* ]] && bad "wrote to the repack folder" || ok "installer source is read-only"
+  [[ "$out" == *N1* ]] && bad "opened an internet connection" || ok "no internet (raw TCP blocked)"
+  [[ "$out" == *N2* ]] && bad "resolved a domain name" || ok "no DNS"
+  [[ "$out" == *P1* ]] && bad "can see/signal your processes" || ok "cannot see or touch your other processes"
+  [[ "$out" == *D1* ]] && bad "D-Bus session bus reachable" || ok "no D-Bus (cannot ask the desktop to run things)"
+  [[ -e "$HOME/.config/autostart/evil.desktop" ]] && bad "planted an autostart entry in your real home" \
+    || ok "autostart/persistence lands only in the fake home"
+  sleep 1
+  pgrep -f "$marker" >/dev/null && { bad "a background process survived after exit"; pkill -f "$marker"; } \
+    || ok "background processes die when the sandbox exits"
+
+  # Same attack from the Windows side, if the sandbox has a Wine prefix
+  if [[ -d "$ROOT/$name/home/prefix" ]]; then
+    local wpath="Z:${canary//\//\\}"
+    out="$(jail "$name" wine cmd /c type "$wpath" 2>/dev/null | tr -d '\r')" || true
+    [[ "$out" == *"$secret"* ]] && bad "Windows program read your real home via Z:" \
+      || ok "Windows programs cannot read your real home via Z:"
+  else
+    echo "  skip  Windows-side check (no Wine prefix in this sandbox; run: gamebox test <name>)"
+  fi
+
+  echo "Result: $pass passed, $fail failed"
+  [[ $fail == 0 ]]
+}
+
+# --------------------------------------------------------------------------
+command -v bwrap >/dev/null || die "bubblewrap is not installed (Arch: sudo pacman -S bubblewrap)"
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  new)      cmd_new "$@" ;;
+  install)  cmd_install "$@" ;;
+  play)     cmd_play "$@" ;;
+  shortcut) cmd_shortcut "$@" ;;
+  shell)    need_box "${1:-}"; jail "$1" bash ;;
+  run)      net=(); [[ "${1:-}" == --net ]] && { net=(--net); shift; }
+            need_box "${1:-}"; jail "${net[@]}" "$@" ;;
+  test)     cmd_test "$@" ;;
+  list)     cmd_list ;;
+  remove)   cmd_remove "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *)        die "unknown command '$cmd' (see: gamebox --help)" ;;
+esac
