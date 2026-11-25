@@ -14,6 +14,7 @@
 # Environment:
 #   GAMEBOX_ROOT   where sandboxes live        (default: ~/Games/gamebox)
 #   GAMEBOX_CPUS   cap a game to N CPU cores   (e.g. GAMEBOX_CPUS=8)
+#   GAMEBOX_NO_VERIFY=1  skip the repack checksum check in `new`
 set -euo pipefail
 
 ROOT="${GAMEBOX_ROOT:-$HOME/Games/gamebox}"
@@ -27,6 +28,8 @@ need_box() { [[ -n "${1:-}" && -d "$ROOT/$1" ]] || die "no sandbox '${1:-}' (see
 
 # --------------------------------------------------------------------------
 # The jail. Everything the game gets is listed here; everything else is hidden.
+# NOTE: every Wine command must end with `wineserver -w`. Wine saves its registry
+# only when wineserver exits, and the jail kills everything when its command ends.
 # --------------------------------------------------------------------------
 jail() {
   local net=--unshare-net extra=() envs=()
@@ -104,7 +107,7 @@ cmd_new() {
 
   # FitGirl-style MD5 check (optional, only if present)
   local md5; md5="$(find "$dir" -maxdepth 2 -iname '*.md5' -print -quit)"
-  if [[ -n "$md5" ]]; then
+  if [[ -n "$md5" && -z "${GAMEBOX_NO_VERIFY:-}" ]]; then
     echo "Verifying checksums..."
     ( cd "$(dirname "$md5")" && tr -d '\r' < "$md5" | grep -v '^;' | sed 's#\\#/#g' | md5sum -c --quiet ) \
       && echo "Checksums OK" || die "checksum mismatch - re-download the failed files"
@@ -114,7 +117,7 @@ cmd_new() {
   echo "$dir" > "$ROOT/$name/repack"
   [[ -n "$setup" ]] && echo "$setup" > "$ROOT/$name/setup"
   echo "Creating Wine prefix + DXVK/VKD3D (network ON for this step only; trusted downloads)..."
-  jail --net "$name" bash -c 'wineboot -i >/dev/null 2>&1 && winetricks -q dxvk vkd3d >/dev/null 2>&1' \
+  jail --net "$name" bash -c 'wineboot -i >/dev/null 2>&1 && winetricks -q dxvk vkd3d >/dev/null 2>&1; rc=$?; wineserver -w; exit $rc' \
     || echo "warning: DXVK/VKD3D install failed; games may still run (Vulkan titles do)"
   echo "Done. Next: gamebox install $name"
 }
@@ -128,7 +131,7 @@ cmd_install() {
     s="$1"; [[ -z "$s" ]] && s=$(cd /mnt/repack && ls | grep -iE "^setup.*\.exe$" | head -1)
     [[ -z "$s" ]] && { echo "no setup*.exe found in the repack folder" >&2; exit 1; }
     echo "Install to C:\\Games\\...  (R: is the read-only source drive)"
-    wine "R:\\$s"' _ "$setup"
+    wine "R:\\$s"; rc=$?; wineserver -w; exit $rc' _ "$setup"
 }
 
 # Find (and remember) the game's exe. Prints the in-sandbox path.
@@ -150,7 +153,7 @@ find_exe() {
 cmd_play() {
   local name="${1:-}"; need_box "$name"
   local exe; exe="$(find_exe "$name" "${2:-}")"
-  jail "$name" bash -c 'cd "$(dirname "$1")" && exec wine "$(basename "$1")"' _ "$exe"
+  jail "$name" bash -c 'cd "$(dirname "$1")" && wine "$(basename "$1")"; rc=$?; wineserver -w; exit $rc' _ "$exe"
 }
 
 # Pull the largest icon out of a PE (.exe) file. Python stdlib only.

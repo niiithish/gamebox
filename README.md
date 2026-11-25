@@ -114,7 +114,7 @@ gamebox remove <name>                  delete a sandbox completely
 
 - **During install, choose a path on `C:`** (for example `C:\Games\MyGame`). `C:` lives inside the sandbox folder on your real disk. `R:` is the read-only installer source, so installing there fails.
 - **Which exe:** `play` picks the game's `.exe` automatically (the largest one that isn't an uninstaller/redistributable) and remembers it. If it picks wrong, for example when a game says it must be started from its launcher: `gamebox play mygame Launcher.exe`.
-- **Repacks with an `MD5` folder** (for example FitGirl) are checksum-verified during `new` using `md5sum`. No Windows tool needed.
+- **Repacks with an `MD5` folder** (for example FitGirl) are checksum-verified during `new` using `md5sum`. No Windows tool needed. Skip it with `GAMEBOX_NO_VERIFY=1 gamebox new ...`.
 - **Vulkan games** (for example RDR2, Doom) can use their native Vulkan renderer. DirectX games go through DXVK/VKD3D.
 - **Where things live:** `~/Games/gamebox/<name>/`. Change it with `GAMEBOX_ROOT`.
 - **Shortcut icons** are extracted from the game's `.exe` inside the sandbox, using a stdlib-only Python PE parser, so the untrusted file is never parsed on the host.
