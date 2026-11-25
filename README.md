@@ -64,9 +64,10 @@ Escape test against sandbox 'mygame' (all attacks should be blocked):
   PASS  cannot see or touch your other processes
   PASS  no D-Bus (cannot ask the desktop to run things)
   PASS  autostart/persistence lands only in the fake home
+  PASS  (sanity) the game can still reach the display
   PASS  background processes die when the sandbox exits
   PASS  Windows programs cannot read your real home via Z:
-Result: 12 passed, 0 failed
+Result: 13 passed, 0 failed
 ```
 
 ## Install (Linux only)
@@ -110,7 +111,7 @@ gamebox remove <name>                  delete a sandbox completely
 **Tips**
 
 - **During install, choose a path on `C:`** (for example `C:\Games\MyGame`). `C:` lives inside the sandbox folder on your real disk. `R:` is the read-only installer source, so installing there fails.
-- **Which exe:** `play` picks the game's `.exe` automatically (the largest one that isn't an uninstaller/redistributable) and remembers it. If it picks wrong: `gamebox play mygame TheRealGame.exe`.
+- **Which exe:** `play` picks the game's `.exe` automatically (the largest one that isn't an uninstaller/redistributable) and remembers it. If it picks wrong, for example when a game says it must be started from its launcher: `gamebox play mygame Launcher.exe`.
 - **Repacks with an `MD5` folder** (for example FitGirl) are checksum-verified during `new` using `md5sum`. No Windows tool needed.
 - **Vulkan games** (for example RDR2, Doom) can use their native Vulkan renderer. DirectX games go through DXVK/VKD3D.
 - **Where things live:** `~/Games/gamebox/<name>/`. Change it with `GAMEBOX_ROOT`.
