@@ -36,6 +36,7 @@ Every game and installer runs with:
 | Send stolen data home, download more malware | No network at all: no TCP, no DNS. |
 | Mine crypto | No network means it can't reach a mining pool, so it earns nothing. It dies when you quit. Use `GAMEBOX_CPUS` to cap cores. |
 | Persist (autostart, systemd units, `.bashrc`, cron) | Those writes land in the fake home. `/usr`, `/etc` are read-only. |
+| Keylog you | Keyboards and mice are never passed in. Only controllers are, and only the ones logind already lets your user read. |
 | Spy on or inject into your other apps | Separate PID namespace: it can't see your processes. |
 | Ask the desktop to launch things (D-Bus, `systemd-run`) | No D-Bus socket. |
 | Encrypt/ransom your files | It can only reach its own sandbox folder. The installer source is read-only. |
@@ -62,12 +63,13 @@ Escape test against sandbox 'mygame' (all attacks should be blocked):
   PASS  no internet (raw TCP blocked)
   PASS  no DNS
   PASS  cannot see or touch your other processes
+  PASS  cannot read your keyboard (no keylogging)
   PASS  no D-Bus (cannot ask the desktop to run things)
   PASS  autostart/persistence lands only in the fake home
   PASS  (sanity) the game can still reach the display
   PASS  background processes die when the sandbox exits
   PASS  Windows programs cannot read your real home via Z:
-Result: 13 passed, 0 failed
+Result: 14 passed, 0 failed
 ```
 
 ## Install (Linux only)
@@ -116,6 +118,7 @@ gamebox remove <name>                  delete a sandbox completely
 - **Vulkan games** (for example RDR2, Doom) can use their native Vulkan renderer. DirectX games go through DXVK/VKD3D.
 - **Where things live:** `~/Games/gamebox/<name>/`. Change it with `GAMEBOX_ROOT`.
 - **Shortcut icons** are extracted from the game's `.exe` inside the sandbox, using a stdlib-only Python PE parser, so the untrusted file is never parsed on the host.
+- **Controllers** work automatically. Connect them **before** launching the game, because devices are passed in at start.
 - **Cap CPU usage:** `GAMEBOX_CPUS=8 gamebox play mygame`.
 
 ## Limitations

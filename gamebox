@@ -55,6 +55,15 @@ jail() {
   # GPU: Mesa (AMD/Intel) and NVIDIA device nodes
   local n; for n in /dev/nvidia*; do [[ -e $n ]] && extra+=(--dev-bind "$n" "$n"); done
 
+  # Controllers only: pass through input devices udev tags as joysticks AND that
+  # your user may read (logind grants gamepads, never keyboards). Keyboards and
+  # mice stay hidden, so a game can't keylog. Connect controllers before launch.
+  for n in /dev/input/event* /dev/input/js*; do
+    [[ -r $n ]] && udevadm info -q property "$n" 2>/dev/null | grep -qx 'ID_INPUT_JOYSTICK=1' \
+      && extra+=(--dev-bind "$n" "$n")
+  done
+  extra+=(--ro-bind-try /run/udev /run/udev)   # device metadata so Wine/SDL can detect them
+
   local pre=()
   [[ -n "${GAMEBOX_CPUS:-}" ]] && pre=(taskset -c "0-$((GAMEBOX_CPUS - 1))")
 
@@ -266,6 +275,7 @@ cmd_test() {
     kill -0 "$2" 2>/dev/null && echo "P1"
     [ -n "$DISPLAY" ] && [ -S "/tmp/.X11-unix/X${DISPLAY#:}" ] && echo "OK_DISPLAY"
     [ -e /run/user/$(id -u)/bus ] && echo "D1"
+    for e in /dev/input/event*; do [ -r "$e" ] && udevadm info -q property "$e" 2>/dev/null | grep -qx ID_INPUT_KEYBOARD=1 && ! udevadm info -q property "$e" | grep -qx ID_INPUT_JOYSTICK=1 && echo "K1"; done
     mkdir -p ~/.config/autostart && echo x > ~/.config/autostart/evil.desktop
     setsid bash -c "exec -a $3 sleep 300" </dev/null >/dev/null 2>&1 &
     true' _ "$canary" "$$" "$marker" 2>/dev/null)" || true
@@ -278,6 +288,7 @@ cmd_test() {
   [[ "$out" == *N1* ]] && bad "opened an internet connection" || ok "no internet (raw TCP blocked)"
   [[ "$out" == *N2* ]] && bad "resolved a domain name" || ok "no DNS"
   [[ "$out" == *P1* ]] && bad "can see/signal your processes" || ok "cannot see or touch your other processes"
+  [[ "$out" == *K1* ]] && bad "can read keyboard input (keylogging possible)" || ok "cannot read your keyboard (no keylogging)"
   [[ "$out" == *D1* ]] && bad "D-Bus session bus reachable" || ok "no D-Bus (cannot ask the desktop to run things)"
   [[ -e "$HOME/.config/autostart/evil.desktop" ]] && bad "planted an autostart entry in your real home" \
     || ok "autostart/persistence lands only in the fake home"
