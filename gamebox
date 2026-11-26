@@ -117,7 +117,7 @@ cmd_new() {
   echo "$dir" > "$ROOT/$name/repack"
   [[ -n "$setup" ]] && echo "$setup" > "$ROOT/$name/setup"
   echo "Creating Wine prefix + DXVK/VKD3D (network ON for this step only; trusted downloads)..."
-  jail --net "$name" bash -c 'wineboot -i >/dev/null 2>&1 && winetricks -q dxvk vkd3d >/dev/null 2>&1; rc=$?; wineserver -w; exit $rc' \
+  jail --net "$name" bash -c 'wineboot -i >/dev/null 2>&1 && winetricks -q dxvk vkd3d vcrun2022 >/dev/null 2>&1; rc=$?; wineserver -w; exit $rc' \
     || echo "warning: DXVK/VKD3D install failed; games may still run (Vulkan titles do)"
   echo "Done. Next: gamebox install $name"
 }

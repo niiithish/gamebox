@@ -42,7 +42,7 @@ Every game and installer runs with:
 | Encrypt/ransom your files | It can only reach its own sandbox folder. The installer source is read-only. |
 | Keep running in the background | When the game exits, everything inside the sandbox is killed. |
 
-Network is only turned on once, during `gamebox new`, while the sandbox is still empty. That step only runs trusted Wine tools to set up the prefix and download DXVK/VKD3D from their official releases. The installer and the game always run offline.
+Network is only turned on once, during `gamebox new`, while the sandbox is still empty. That step only runs trusted Wine tools to set up the prefix and download DXVK/VKD3D and the Visual C++ runtime from their official releases. The installer and the game always run offline.
 
 ### Don't trust me: test it
 
