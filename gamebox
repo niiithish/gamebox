@@ -188,7 +188,14 @@ cmd_runner() {
          jail "$name" bash -c 'S=$WINEPREFIX/drive_c/windows; B=$(mktemp -d)
            for d in system32 syswow64; do mkdir -p $B/$d
              cp -p $S/$d/{msvcp140,vcruntime140,concrt140,vcomp140}*.dll $B/$d/ 2>/dev/null; done
-           wineboot -u >/dev/null 2>&1; wineserver -w
+           wineboot -u >/dev/null 2>&1
+           # a prefix made by system Wine maps the video decoders (H.264 etc.) to
+           # winegstreamer; GE ships its own (winedmo). Re-register or videos fail.
+           if [[ -n "${GAMEBOX_RUNNER:-}" ]]; then
+             wine regsvr32 /s winedmo.dll msmpeg2vdec.dll >/dev/null 2>&1
+             wine C:/windows/syswow64/regsvr32.exe /s winedmo.dll msmpeg2vdec.dll >/dev/null 2>&1
+           fi
+           wineserver -w
            for d in system32 syswow64; do cp -pf $B/$d/*.dll $S/$d/ 2>/dev/null; done; true'
          sync_runner_dlls "$name"
          echo "'$name' now uses $r." ;;
