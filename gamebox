@@ -57,6 +57,9 @@ jail() {
   fi
 
   # GPU: Mesa (AMD/Intel) and NVIDIA device nodes
+  # ntsync: kernel-side Windows sync objects (what Proton uses). Far less
+  # wineserver overhead, fewer stalls/hangs in modern games. Grants no data access.
+  extra+=(--dev-bind-try /dev/ntsync /dev/ntsync)
   local n; for n in /dev/nvidia*; do [[ -e $n ]] && extra+=(--dev-bind "$n" "$n"); done
 
   # Controllers only: pass through input devices udev tags as joysticks AND that
