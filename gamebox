@@ -11,6 +11,7 @@
 #   gamebox list                           list sandboxes and disk use
 #   gamebox remove <name>                  delete a sandbox completely
 #   gamebox runner <name> [ge|system]      use GE-Proton's Wine (better game compat) or system Wine
+#   gamebox steamid <name> <appid>         enable Proton's fixes for that Steam game (store.steampowered.com/app/<appid>)
 #
 # Environment:
 #   GAMEBOX_ROOT   where sandboxes live        (default: ~/Games/gamebox)
@@ -25,7 +26,7 @@ SELF="$(realpath "$0")"
 U=$(id -u)
 
 die() { echo "gamebox: $1" >&2; [[ -t 1 ]] || notify-send -u critical "gamebox" "$1" 2>/dev/null || true; exit 1; }
-usage() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; }
 need_box() { [[ -n "${1:-}" && -d "$ROOT/$1" ]] || die "no sandbox '${1:-}' (see: gamebox list)"; }
 
 # --------------------------------------------------------------------------
@@ -94,6 +95,16 @@ jail() {
            --setenv MEDIACONV_BLANK_VIDEO_FILE "$F/share/media/blank.mkv"
            --setenv MEDIACONV_BLANK_AUDIO_FILE "$F/share/media/blank.ptna"
            --setenv GAMEBOX_RUNNER "$R")
+  fi
+
+  # Per-game settings: $box/env holds KEY=VALUE lines (e.g. SteamGameId=4115450,
+  # which turns on Proton's game-specific fixes). Values are plain text, never run.
+  if [[ -f "$box/env" ]]; then
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+      envs+=(--setenv "${line%%=*}" "${line#*=}")
+    done < "$box/env"
   fi
 
   local pre=()
@@ -184,6 +195,15 @@ cmd_runner() {
     *)   [[ -x "$RUNNERS/$want/files/bin/wine" ]] || die "unknown runner '$want' (use: ge, system)"
          echo "$want" > "$box/runner"; sync_runner_dlls "$name"; echo "'$name' now uses $want." ;;
   esac
+}
+
+cmd_steamid() {
+  local name="${1:-}" id="${2:-}"; need_box "$name"
+  [[ "$id" =~ ^[0-9]+$ ]] || die "usage: gamebox steamid <name> <numeric Steam app id>"
+  local f="$ROOT/$name/env"; touch "$f"
+  grep -vE '^(SteamGameId|SteamAppId)=' "$f" > "$f.tmp" || true
+  printf 'SteamGameId=%s\nSteamAppId=%s\n' "$id" "$id" >> "$f.tmp"; mv "$f.tmp" "$f"
+  echo "'$name' now identifies as Steam app $id (Proton game fixes apply)."
 }
 
 cmd_new() {
@@ -422,6 +442,7 @@ case "$cmd" in
   list)     cmd_list ;;
   remove)   cmd_remove "$@" ;;
   runner)   cmd_runner "$@" ;;
+  steamid)  cmd_steamid "$@" ;;
   ""|-h|--help|help) usage ;;
   *)        die "unknown command '$cmd' (see: gamebox --help)" ;;
 esac
