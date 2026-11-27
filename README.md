@@ -108,6 +108,7 @@ gamebox run [--net] <name> <cmd...>    run any command inside the sandbox
 gamebox test [name]                    prove the sandbox holds (harmless escape test)
 gamebox list                           list sandboxes and disk use
 gamebox remove <name>                  delete a sandbox completely
+gamebox runner <name> [ge|system]      use GE-Proton's Wine or system Wine
 ```
 
 **Tips**
@@ -119,6 +120,7 @@ gamebox remove <name>                  delete a sandbox completely
 - **Where things live:** `~/Games/gamebox/<name>/`. Change it with `GAMEBOX_ROOT`.
 - **Shortcut icons** are extracted from the game's `.exe` inside the sandbox, using a stdlib-only Python PE parser, so the untrusted file is never parsed on the host.
 - **Controllers** work automatically. Connect them **before** launching the game, because devices are passed in at start.
+- **Better compatibility (GE-Proton):** `gamebox runner mygame ge` downloads the latest [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom) (checksum-verified) and runs the game with its Wine: bundled video codecs, game fixes, newer DXVK/VKD3D. Still fully sandboxed; Proton's own container isn't used. `gamebox runner mygame system` switches back.
 - **Cap CPU usage:** `GAMEBOX_CPUS=8 gamebox play mygame`.
 - **FPS counter:** install `mangohud` + `lib32-mangohud`, then `MANGOHUD=1 gamebox play mygame` (toggle in-game with `Shift+F12`). `DXVK_HUD=fps` also works for DirectX 9–11 games.
 

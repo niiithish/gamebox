@@ -10,6 +10,7 @@
 #   gamebox test [name]                    prove the sandbox holds (harmless escape test)
 #   gamebox list                           list sandboxes and disk use
 #   gamebox remove <name>                  delete a sandbox completely
+#   gamebox runner <name> [ge|system]      use GE-Proton's Wine (better game compat) or system Wine
 #
 # Environment:
 #   GAMEBOX_ROOT   where sandboxes live        (default: ~/Games/gamebox)
@@ -24,7 +25,7 @@ SELF="$(realpath "$0")"
 U=$(id -u)
 
 die() { echo "gamebox: $1" >&2; [[ -t 1 ]] || notify-send -u critical "gamebox" "$1" 2>/dev/null || true; exit 1; }
-usage() { sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
 need_box() { [[ -n "${1:-}" && -d "$ROOT/$1" ]] || die "no sandbox '${1:-}' (see: gamebox list)"; }
 
 # --------------------------------------------------------------------------
@@ -80,6 +81,21 @@ jail() {
     [[ -n "${!v:-}" ]] && envs+=(--setenv "$v" "${!v}")
   done
 
+  # Runner: system Wine by default, or a GE-Proton build (bundled codecs, game
+  # fixes, newer DXVK/VKD3D). Mounted read-only; Proton's own container is not used.
+  local path=/usr/bin rdir; rdir="$(runner_dir "$box")"
+  if [[ -n "$rdir" ]]; then
+    local R=/run/gamebox-runner F=/run/gamebox-runner/files
+    extra+=(--ro-bind "$rdir" "$R")
+    path="$F/bin:/usr/bin"
+    envs+=(--setenv LD_LIBRARY_PATH "$F/lib/x86_64-linux-gnu:$F/lib/i386-linux-gnu"
+           --setenv WINEDLLPATH "$F/lib/vkd3d:$F/lib/wine"
+           --setenv WINENTSYNC 1 --setenv WINEFSYNC 1
+           --setenv MEDIACONV_BLANK_VIDEO_FILE "$F/share/media/blank.mkv"
+           --setenv MEDIACONV_BLANK_AUDIO_FILE "$F/share/media/blank.ptna"
+           --setenv GAMEBOX_RUNNER "$R")
+  fi
+
   local pre=()
   [[ -n "${GAMEBOX_CPUS:-}" ]] && pre=(taskset -c "0-$((GAMEBOX_CPUS - 1))")
 
@@ -97,7 +113,7 @@ jail() {
     --hostname gamebox --die-with-parent --new-session \
     "${extra[@]}" \
     --clearenv "${envs[@]}" \
-    --setenv HOME "$HOME" --setenv USER "${USER:-user}" --setenv PATH /usr/bin \
+    --setenv HOME "$HOME" --setenv USER "${USER:-user}" --setenv PATH "$path" \
     --setenv LANG "${LANG:-C.UTF-8}" \
     --setenv XDG_RUNTIME_DIR /run/user/"$U" \
     --setenv PULSE_SERVER unix:/run/user/"$U"/pulse/native \
@@ -107,6 +123,64 @@ jail() {
 }
 
 # --------------------------------------------------------------------------
+RUNNERS="${XDG_DATA_HOME:-$HOME/.local/share}/gamebox/runners"
+
+runner_dir() {   # prints the runner directory for a sandbox, or nothing (system Wine)
+  local r; r="$(cat "$1/runner" 2>/dev/null || true)"
+  [[ -n "$r" && -x "$RUNNERS/$r/files/bin/wine" ]] && echo "$RUNNERS/$r"; true
+}
+
+# Download the latest GE-Proton from its official GitHub releases, verify sha512.
+fetch_ge() {
+  local api=https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest
+  local json tag url sum tmp
+  json="$(curl -fsSL "$api")" || die "could not reach GitHub"
+  tag="$(grep -m1 '"tag_name"' <<<"$json" | cut -d'"' -f4)"
+  [[ -n "$tag" ]] || die "could not read latest GE-Proton release"
+  if [[ -x "$RUNNERS/$tag-x86_64/files/bin/wine" ]]; then echo "$tag-x86_64"; return; fi
+  url="$(grep -o 'https://[^"]*x86_64\.tar\.gz' <<<"$json" | head -1)"
+  sum="$(grep -o 'https://[^"]*x86_64\.sha512sum' <<<"$json" | head -1)"
+  [[ -n "$url" && -n "$sum" ]] || die "release $tag has no x86_64 build"
+  mkdir -p "$RUNNERS"; tmp="$(mktemp -d "$RUNNERS/.dl.XXXX")"
+  echo "Downloading $tag (~600 MB)..." >&2
+  ( cd "$tmp" && curl -fL# -o "${url##*/}" "$url" && curl -fsSL -o "${sum##*/}" "$sum" \
+      && sha512sum -c --quiet "${sum##*/}" >&2 && tar -xzf "${url##*/}" -C "$RUNNERS" ) \
+    || { rm -rf "$tmp"; die "download or checksum failed"; }
+  rm -rf "$tmp"
+  ls -d "$RUNNERS"/"$tag"* >/dev/null 2>&1 || die "unexpected archive layout"
+  basename "$(ls -d "$RUNNERS"/"$tag"* | head -1)"
+}
+
+# Proton copies its DXVK/VKD3D into the prefix on every launch; do the same.
+sync_runner_dlls() {
+  jail "$1" bash -c '
+    [[ -n "${GAMEBOX_RUNNER:-}" ]] || exit 0
+    L=$GAMEBOX_RUNNER/files/lib/wine; S=$WINEPREFIX/drive_c/windows
+    cp -f $L/dxvk/x86_64-windows/{d3d8,d3d9,d3d10core,d3d11,dxgi}.dll \
+          $L/vkd3d-proton/x86_64-windows/{d3d12,d3d12core}.dll $S/system32/ 2>/dev/null
+    cp -f $L/dxvk/i386-windows/{d3d8,d3d9,d3d10core,d3d11,dxgi}.dll \
+          $L/vkd3d-proton/i386-windows/{d3d12,d3d12core}.dll $S/syswow64/ 2>/dev/null
+    true'
+}
+
+cmd_runner() {
+  local name="${1:-}" want="${2:-}"; need_box "$name"
+  local box="$ROOT/$name"
+  case "$want" in
+    "") local r; r="$(runner_dir "$box")"
+        if [[ -n "$r" ]]; then basename "$r"; else echo "system Wine ($(wine --version 2>/dev/null))"; fi ;;
+    system) rm -f "$box/runner"; echo "'$name' now uses system Wine." ;;
+    ge)  local r; r="$(fetch_ge)" || exit 1
+         echo "$r" > "$box/runner"
+         echo "Updating the prefix for $r..."
+         jail "$name" bash -c 'wineboot -u >/dev/null 2>&1; wineserver -w'
+         sync_runner_dlls "$name"
+         echo "'$name' now uses $r." ;;
+    *)   [[ -x "$RUNNERS/$want/files/bin/wine" ]] || die "unknown runner '$want' (use: ge, system)"
+         echo "$want" > "$box/runner"; sync_runner_dlls "$name"; echo "'$name' now uses $want." ;;
+  esac
+}
+
 cmd_new() {
   local name="${1:-}" src="${2:-}"
   [[ -n "$name" && -n "$src" ]] || die "usage: gamebox new <name> <repack-folder | installer.exe>"
@@ -166,6 +240,7 @@ find_exe() {
 cmd_play() {
   local name="${1:-}"; need_box "$name"
   local exe; exe="$(find_exe "$name" "${2:-}")"
+  sync_runner_dlls "$name"
   jail "$name" bash -c 'cd "$(dirname "$1")" && wine "$(basename "$1")"; rc=$?; wineserver -w; exit $rc' _ "$exe"
 }
 
@@ -341,6 +416,7 @@ case "$cmd" in
   test)     cmd_test "$@" ;;
   list)     cmd_list ;;
   remove)   cmd_remove "$@" ;;
+  runner)   cmd_runner "$@" ;;
   ""|-h|--help|help) usage ;;
   *)        die "unknown command '$cmd' (see: gamebox --help)" ;;
 esac
