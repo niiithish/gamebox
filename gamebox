@@ -173,7 +173,12 @@ cmd_runner() {
     ge)  local r; r="$(fetch_ge)" || exit 1
          echo "$r" > "$box/runner"
          echo "Updating the prefix for $r..."
-         jail "$name" bash -c 'wineboot -u >/dev/null 2>&1; wineserver -w'
+         # wineboot -u replaces native VC++ runtime DLLs with Wine's stubs; keep the real ones
+         jail "$name" bash -c 'S=$WINEPREFIX/drive_c/windows; B=$(mktemp -d)
+           for d in system32 syswow64; do mkdir -p $B/$d
+             cp -p $S/$d/{msvcp140,vcruntime140,concrt140,vcomp140}*.dll $B/$d/ 2>/dev/null; done
+           wineboot -u >/dev/null 2>&1; wineserver -w
+           for d in system32 syswow64; do cp -pf $B/$d/*.dll $S/$d/ 2>/dev/null; done; true'
          sync_runner_dlls "$name"
          echo "'$name' now uses $r." ;;
     *)   [[ -x "$RUNNERS/$want/files/bin/wine" ]] || die "unknown runner '$want' (use: ge, system)"
