@@ -73,6 +73,9 @@ jail() {
 
   # Overlays/tuning the user opts into (FPS counters etc.). Only these names pass
   # through --clearenv; everything else in your environment stays hidden.
+  # Mesa's default 1 GB shader cache is too small for UE5 games: once full it
+  # evicts and recompiles, which shows up as stutter. Give it room.
+  envs+=(--setenv MESA_SHADER_CACHE_MAX_SIZE "${MESA_SHADER_CACHE_MAX_SIZE:-10G}")
   local v; for v in MANGOHUD MANGOHUD_CONFIG DXVK_HUD DXVK_FRAME_RATE VKD3D_CONFIG; do
     [[ -n "${!v:-}" ]] && envs+=(--setenv "$v" "${!v}")
   done
