@@ -15,6 +15,7 @@
 #   GAMEBOX_ROOT   where sandboxes live        (default: ~/Games/gamebox)
 #   GAMEBOX_CPUS   cap a game to N CPU cores   (e.g. GAMEBOX_CPUS=8)
 #   GAMEBOX_NO_VERIFY=1  skip the repack checksum check in `new`
+#   MANGOHUD=1 / DXVK_HUD=fps  FPS overlay (passed into the sandbox)
 set -euo pipefail
 
 ROOT="${GAMEBOX_ROOT:-$HOME/Games/gamebox}"
@@ -23,7 +24,7 @@ SELF="$(realpath "$0")"
 U=$(id -u)
 
 die() { echo "gamebox: $1" >&2; [[ -t 1 ]] || notify-send -u critical "gamebox" "$1" 2>/dev/null || true; exit 1; }
-usage() { sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'; }
 need_box() { [[ -n "${1:-}" && -d "$ROOT/$1" ]] || die "no sandbox '${1:-}' (see: gamebox list)"; }
 
 # --------------------------------------------------------------------------
@@ -66,6 +67,12 @@ jail() {
       && extra+=(--dev-bind "$n" "$n")
   done
   extra+=(--ro-bind-try /run/udev /run/udev)   # device metadata so Wine/SDL can detect them
+
+  # Overlays/tuning the user opts into (FPS counters etc.). Only these names pass
+  # through --clearenv; everything else in your environment stays hidden.
+  local v; for v in MANGOHUD MANGOHUD_CONFIG DXVK_HUD DXVK_FRAME_RATE VKD3D_CONFIG; do
+    [[ -n "${!v:-}" ]] && envs+=(--setenv "$v" "${!v}")
+  done
 
   local pre=()
   [[ -n "${GAMEBOX_CPUS:-}" ]] && pre=(taskset -c "0-$((GAMEBOX_CPUS - 1))")
